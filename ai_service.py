@@ -87,12 +87,19 @@ def generate_with_retry(client, prompt, attempts=3):
                 attempts,
             )
 
+            start_time = time.perf_counter()
+
             response = client.models.generate_content(
                 model=MODEL,
                 contents=prompt,
             )
 
-            logger.info("Gemini request completed successfully.")
+            elapsed = time.perf_counter() - start_time
+
+            logger.info(
+                "Gemini request completed successfully in %.2f seconds.",
+                elapsed,
+            )
 
             return response
 
