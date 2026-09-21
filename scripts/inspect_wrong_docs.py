@@ -1,76 +1,112 @@
-from loader import Inbox
-from document_reader import read_document
+#!/usr/bin/env python3
+"""
+Find attachments labelled as a Bill of Lading that are actually some other
+document type.
+
+Reports two groups:
+
+1. what the pipeline already detects (``pipeline.detect_wrong_doc_type``),
+   which drives NEEDS_REVIEW / wrong_doc_type;
+2. extra phrases the pipeline does NOT currently look for — a candidate list
+   for widening the detection, printed separately so the difference between
+   current and potential behaviour stays visible.
+
+    python scripts/inspect_wrong_docs.py
+"""
+
+import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-DATA_SOURCE = r"C:\Users\suley\Documents\hackathon\sdoc-hackathon-bundle"
+from shipguard.config import get_data_source
+from shipguard.document_reader import read_document
+from shipguard.loader import Inbox
+from shipguard.pipeline import detect_wrong_doc_type, find_attachment
 
 
-def detect_wrong_doc_type(text):
-    text_lower = text.lower()
+# Phrases the pipeline does not check for (yet).
+EXTRA_PATTERNS = {
+    "not a shipping instruction": "not_si",
+    "not an si or bl": "not_si_or_bl",
+}
 
-    if "commercial invoice" in text_lower:
-        return "commercial_invoice"
 
-    if "packing list" in text_lower:
-        return "packing_list"
+def detect_extra(text):
+    lowered = text.lower()
 
-    if "certificate of origin" in text_lower:
-        return "certificate_of_origin"
-
-    if "not a shipping instruction" in text_lower:
-        return "not_si"
-
-    if "not an si or bl" in text_lower:
-        return "not_si_or_bl"
+    for phrase, label in EXTRA_PATTERNS.items():
+        if phrase in lowered:
+            return label
 
     return None
 
 
 def main():
-    inbox = Inbox(DATA_SOURCE)
+
+    inbox = Inbox(get_data_source())
 
     print("=" * 80)
     print("CHECKING BL ATTACHMENTS FOR WRONG DOCUMENT TYPES")
     print("=" * 80)
 
-    found = []
+    detected = []
+    undetected = []
+    unreadable = []
 
     for email in inbox:
-        email_id = email["email_id"]
 
-        for attachment in email.get("attachments", []):
-            filename = Path(attachment).name.lower()
+        bl_path = find_attachment(email.get("attachments", []), "BL")
 
-            if not filename.endswith("_bl.txt"):
-                continue
+        if not bl_path:
+            continue
 
-            try:
-                text = read_document(inbox, attachment)
-            except Exception:
-                continue
+        try:
+            text = read_document(inbox, bl_path)
 
-            doc_type = detect_wrong_doc_type(text)
+        except Exception as error:
+            unreadable.append((email["email_id"], bl_path, str(error)))
+            continue
 
-            if doc_type:
-                found.append({
-                    "email_id": email_id,
-                    "attachment": attachment,
-                    "doc_type": doc_type,
-                })
+        doc_type = detect_wrong_doc_type(text)
+
+        if doc_type:
+            detected.append((email["email_id"], doc_type, bl_path))
+            continue
+
+        extra = detect_extra(text)
+
+        if extra:
+            undetected.append((email["email_id"], extra, bl_path))
 
     print()
-    print(f"Found: {len(found)}")
+    print(f"Detected by the pipeline: {len(detected)}")
     print()
 
-    for item in found:
+    for email_id, doc_type, path in detected:
+        print(f"{email_id} | {doc_type} | {path}")
+
+    print()
+    print("=" * 80)
+    print(f"NOT detected by the pipeline: {len(undetected)}")
+    print("=" * 80)
+    print()
+
+    if undetected:
         print(
-            item["email_id"],
-            "|",
-            item["doc_type"],
-            "|",
-            item["attachment"],
+            "These BL attachments announce they are not an SI/BL but do not "
+            "match the pipeline's current wrong_doc_type patterns:"
         )
+        print()
+
+    for email_id, doc_type, path in undetected:
+        print(f"{email_id} | {doc_type} | {path}")
+
+    print()
+    print(f"Unreadable BL attachments: {len(unreadable)}")
+
+    for email_id, path, error in unreadable:
+        print(f"{email_id} | {path} | {error}")
 
 
 if __name__ == "__main__":

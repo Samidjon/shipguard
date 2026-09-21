@@ -6,3 +6,6 @@ pypdf
 python-docx
 openpyxl
 PyMuPDF
+
+# Testing
+pytest

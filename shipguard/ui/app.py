@@ -1,14 +1,17 @@
 import json
+import json
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
-from loader import Inbox
-from pipeline import process_email, DATA_SOURCE
-from document_reader import read_document
-from extractor import extract_document
-from ai_service import (
+from shipguard.loader import Inbox
+from shipguard.pipeline import process_email, DATA_SOURCE
+from shipguard.document_reader import read_document
+from shipguard.extractor import extract_document
+from shipguard.config import FIELDS, SUBMISSION_PATH
+from shipguard.ui.formatting import format_value
+from shipguard.ai_service import (
     analyze_shipping_email,
     analyze_document_discrepancies,
 )
@@ -89,7 +92,7 @@ st.markdown(
 
     .sg-card-title {
         font-size: 0.78rem;
-        color: #94a3b8;
+        color: #aebcd4;
         text-transform: uppercase;
         letter-spacing: 0.08em;
         margin-bottom: 0.35rem;
@@ -174,7 +177,7 @@ st.markdown(
     /* Small labels */
 
     .sg-label {
-        color: #94a3b8;
+        color: #aebcd4;
         font-size: 0.82rem;
         margin-bottom: 0.25rem;
     }
@@ -191,6 +194,59 @@ st.markdown(
         border-right: 1px solid rgba(148,163,184,0.10);
     }
 
+    /* Streamlit chrome
+       The default toolbar sits on an opaque strip that showed as a white band
+       across the top of the dark page. */
+
+    header[data-testid="stHeader"] {
+        background: transparent;
+    }
+
+    /* Section headings
+       Streamlit's own heading colour is tuned for its default surface and read
+       as dim grey against this background, so set it explicitly. */
+
+    .block-container h2 {
+        color: #f1f5ff;
+        font-weight: 750;
+        letter-spacing: -0.01em;
+        margin-top: 1.9rem;
+        margin-bottom: 0.7rem;
+    }
+
+    .block-container h3 {
+        color: #e2e8f5;
+        font-weight: 700;
+        margin-top: 1.3rem;
+    }
+
+    /* Metrics — keep the label readable and the value prominent. */
+
+    div[data-testid="stMetricLabel"] {
+        color: #a9b7d0;
+        font-size: 0.8rem;
+        text-transform: uppercase;
+        letter-spacing: 0.07em;
+    }
+
+    div[data-testid="stMetricValue"] {
+        color: #f8fafc;
+        font-weight: 750;
+    }
+
+    /* Expander headers were nearly invisible. */
+
+    details summary {
+        color: #cdd8ec !important;
+    }
+
+    /* Sidebar captions and widget labels. */
+
+    section[data-testid="stSidebar"] label,
+    section[data-testid="stSidebar"] p {
+        color: #c2cee4;
+    }
+
     </style>
     """,
     unsafe_allow_html=True,
@@ -204,6 +260,26 @@ st.markdown(
 @st.cache_resource
 def load_inbox():
     return Inbox(DATA_SOURCE)
+
+
+@st.cache_data
+def load_last_run():
+    """
+    Read submission.json — the pipeline's own output from the last full run.
+
+    Used to power the inbox overview and the sidebar filters. Reading the
+    existing artifact keeps this instant, where re-processing 520 emails in
+    the browser session would cost a slow first paint. Returns an empty dict
+    when the file is absent, so the UI degrades to a plain email list instead
+    of failing.
+    """
+
+    path = SUBMISSION_PATH
+
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:
+        return {}
 
 def is_ai_temporary_error(error):
     """
@@ -275,22 +351,12 @@ def get_comparison_data(inbox, email):
         except Exception:
             bl_data = {}
 
-    fields = [
-        "shipper",
-        "consignee",
-        "notify_party",
-        "port_of_loading",
-        "port_of_discharge",
-        "container_count",
-        "gross_weight_kg",
-    ]
-
     rows = []
 
     result = st.session_state.get("result", {})
     defect_fields = result.get("defect_fields", []) or []
 
-    for field in fields:
+    for field in FIELDS:
 
         si_value = si_data.get(field)
         bl_value = bl_data.get(field)
@@ -298,15 +364,19 @@ def get_comparison_data(inbox, email):
         if field in defect_fields:
             comparison = "⚠ Mismatch"
         elif si_value is None or bl_value is None:
-            comparison = "— Not available"
+            comparison = "— n/a"
         else:
             comparison = "✓ Match"
 
         rows.append(
             {
                 "Field": field.replace("_", " ").title(),
-                "Shipping Instruction": si_value if si_value is not None else "—",
-                "Bill of Lading": bl_value if bl_value is not None else "—",
+                # Rendered as text on purpose. The seven fields mix types —
+                # container_count is an int, gross_weight_kg a float, the rest
+                # strings — and a mixed-type column makes Arrow fail to infer
+                # a dtype, which spat a traceback on every render.
+                "Shipping Instruction": format_value(si_value),
+                "Bill of Lading": format_value(bl_value),
                 "Result": comparison,
             }
         )
@@ -340,21 +410,11 @@ def get_ai_comparison_rows(inbox, email, result):
         except Exception:
             bl_data = {}
 
-    fields = [
-        "shipper",
-        "consignee",
-        "notify_party",
-        "port_of_loading",
-        "port_of_discharge",
-        "container_count",
-        "gross_weight_kg",
-    ]
-
     defect_fields = result.get("defect_fields", []) or []
 
     rows = []
 
-    for field in fields:
+    for field in FIELDS:
 
         si_value = si_data.get(field)
         bl_value = bl_data.get(field)
@@ -457,17 +517,107 @@ st.markdown(
 # SIDEBAR
 # ============================================================
 
-st.sidebar.markdown("## 📩 Email Analysis")
-st.sidebar.caption(f"{len(emails)} emails available")
+st.sidebar.markdown("## 📩 Inbox")
 
+last_run = load_last_run()
+
+# ------------------------------------------------------------
+# Overview of the last full run
+# ------------------------------------------------------------
+
+if last_run:
+
+    comparisons = sum(
+        1 for entry in last_run.values()
+        if entry.get("category") == "BL_COMPARISON"
+    )
+    defects = sum(
+        1 for entry in last_run.values()
+        if entry.get("status") == "MISMATCH"
+    )
+    needs_review = sum(
+        1 for entry in last_run.values()
+        if entry.get("status") == "NEEDS_REVIEW"
+    )
+
+    overview_col1, overview_col2 = st.sidebar.columns(2)
+
+    with overview_col1:
+        st.metric("Emails", len(emails))
+        st.metric("Defects", defects)
+
+    with overview_col2:
+        st.metric("Comparisons", comparisons)
+        st.metric("Needs review", needs_review)
+
+    st.sidebar.caption("Totals from the last full pipeline run.")
+
+else:
+    st.sidebar.caption(f"{len(emails)} emails available")
+
+
+# ------------------------------------------------------------
+# Filters
+#
+# Picking a case out of 520 raw ids was the main friction: finding a defect
+# meant running a script in a terminal. Filtering by what the pipeline
+# decided turns the list into a work queue.
+# ------------------------------------------------------------
+
+st.sidebar.markdown("### 🔎 Find a case")
+
+ANY = "Any"
+
+if last_run:
+
+    category_options = [ANY] + sorted(
+        {
+            entry.get("category")
+            for entry in last_run.values()
+            if entry.get("category")
+        }
+    )
+
+    status_options = [ANY] + sorted(
+        {
+            entry.get("status")
+            for entry in last_run.values()
+            if entry.get("status")
+        }
+    )
+
+    category_filter = st.sidebar.selectbox("Category", category_options)
+    status_filter = st.sidebar.selectbox("Status", status_options)
+
+    def matches_filters(email_id):
+        entry = last_run.get(email_id, {})
+
+        if category_filter != ANY and entry.get("category") != category_filter:
+            return False
+
+        if status_filter != ANY and entry.get("status") != status_filter:
+            return False
+
+        return True
+
+    visible_ids = [eid for eid in email_ids if matches_filters(eid)]
+
+else:
+    visible_ids = list(email_ids)
+
+if not visible_ids:
+    st.sidebar.warning("No email matches these filters.")
+    visible_ids = list(email_ids)
+
+# Keep the familiar demo email selected when it survives the current filter.
 default_index = 0
 
-if "email_243" in email_ids:
-    default_index = email_ids.index("email_243")
+if "email_243" in visible_ids:
+    default_index = visible_ids.index("email_243")
 
 selected_id = st.sidebar.selectbox(
-    "Select email",
-    email_ids,
+    f"Email ({len(visible_ids)} of {len(email_ids)})",
+    visible_ids,
     index=default_index,
 )
 
@@ -639,19 +789,30 @@ with st.expander("📨 Email body", expanded=False):
 
 
 # ============================================================
-# AI ANALYSIS
+# AI INTENT CROSS-CHECK
+#
+# Deliberately rendered AFTER the verdict. The deterministic engine decides;
+# this section is an independent second opinion on what the email is asking
+# for, not the source of the decision.
 # ============================================================
 
-ai_result = st.session_state.get("ai_result")
 
-if ai_result:
+def render_ai_intent_check(ai_result, result):
 
-    st.markdown("## 🤖 AI Analysis")
+    st.markdown("## 🤖 AI cross-check of the email intent")
 
     ai_category = ai_result.get("category", "GENERAL")
     ai_summary = ai_result.get("summary", "No summary available.")
     ai_confidence = ai_result.get("confidence", 0)
-    ai_temporary_error = ai_result.get("temporary_error",False, )
+    ai_temporary_error = ai_result.get("temporary_error", False)
+
+    # When the AI layer failed it returned no category at all, so there is
+    # nothing to agree or disagree with. Saying "AI classification differs"
+    # in that case would misrepresent an outage as a conflicting opinion.
+    ai_unavailable = ai_temporary_error or ai_category in {
+        "ERROR",
+        "TEMPORARILY_UNAVAILABLE",
+    }
 
     try:
         confidence_percent = float(ai_confidence) * 100
@@ -660,25 +821,25 @@ if ai_result:
 
     pipeline_category = result.get("category", "—")
 
-if ai_temporary_error:
+    if ai_unavailable:
 
-    agreement_text = (
-        "ShipGuard pipeline remains active and provides "
-        "the authoritative validation result."
-    )
+        agreement_text = (
+            "ShipGuard pipeline remains active and provides "
+            "the authoritative validation result."
+        )
 
-elif ai_category == pipeline_category:
+    elif ai_category == pipeline_category:
 
-    agreement_text = (
-        "✓ AI classification agrees with ShipGuard pipeline"
-    )
+        agreement_text = (
+            "✓ AI classification agrees with ShipGuard pipeline"
+        )
 
-else:
+    else:
 
-    agreement_text = (
-        f"⚠ AI classification differs from pipeline "
-        f"({pipeline_category})"
-    )
+        agreement_text = (
+            f"⚠ AI classification differs from pipeline "
+            f"({pipeline_category})"
+        )
 
     ai_col1, ai_col2 = st.columns([2, 1])
 
@@ -686,9 +847,9 @@ else:
 
         st.markdown("**AI Category**")
 
-        if ai_temporary_error:
+        if ai_unavailable:
 
-            st.warning("⚠️ Temporarily unavailable")
+            st.warning("⚠️ Unavailable")
 
         else:
 
@@ -696,11 +857,16 @@ else:
 
     with ai_col2:
         st.markdown("**Confidence**")
-        st.markdown(f"### {confidence_percent:.0f}%")
+
+        # A failed call carries no confidence; showing 0% reads as a verdict.
+        if ai_unavailable:
+            st.markdown("### —")
+        else:
+            st.markdown(f"### {confidence_percent:.0f}%")
 
     st.markdown("**AI Summary**")
 
-    if ai_temporary_error:
+    if ai_unavailable:
 
         st.warning(ai_summary)
 
@@ -708,7 +874,7 @@ else:
 
         st.info(ai_summary)
 
-    if ai_temporary_error:
+    if ai_unavailable:
 
         st.info(agreement_text)
 
@@ -722,18 +888,11 @@ else:
 
 
 # ============================================================
-# FINAL RESULT
-# ============================================================
-
-st.markdown("## 🔎 Analysis Result")
-
-render_status(result)
-
-# ============================================================
 # AI DOCUMENT EXPLANATION
 # ============================================================
 
-if result.get("category") == "BL_COMPARISON":
+
+def render_ai_explanation(inbox, selected_email, result):
 
     st.markdown("## 🤖 AI Verification Explanation")
 
@@ -820,7 +979,10 @@ if result.get("category") == "BL_COMPARISON":
 
     if discrepancies:
 
-        st.markdown("### ⚠️ Detected discrepancies")
+        # Named to make clear this is the AI explaining the engine's findings,
+        # not a second source of truth. The authoritative list of defect
+        # fields is rendered under the verdict, above.
+        st.markdown("### 🗒️ AI notes per field")
 
         for discrepancy in discrepancies:
 
@@ -845,6 +1007,18 @@ if result.get("category") == "BL_COMPARISON":
     st.markdown("### 💡 Recommendation")
 
     st.success(recommendation)
+
+
+# ============================================================
+# VERDICT
+#
+# The deterministic result leads the page: it is what the product actually
+# decides, and everything below either details it or explains it.
+# ============================================================
+
+st.markdown("## 🔎 Analysis Result")
+
+render_status(result)
 
 
 # ============================================================
@@ -959,10 +1133,29 @@ if result.get("category") == "BL_COMPARISON":
             ),
             "Result": st.column_config.TextColumn(
                 "Result",
-                width="medium",
+                width="small",
             ),
         },
     )
+
+
+# ============================================================
+# AI LAYER
+#
+# Rendered after the verdict and the field-by-field comparison, so the page
+# reads in the same order the system works: the engine decides, then the AI
+# explains. Both calls keep the guards they had inline.
+# ============================================================
+
+if result.get("category") == "BL_COMPARISON":
+
+    render_ai_explanation(inbox, selected_email, result)
+
+ai_result = st.session_state.get("ai_result")
+
+if ai_result:
+
+    render_ai_intent_check(ai_result, result)
 
 
 # ============================================================

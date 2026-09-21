@@ -1,15 +1,6 @@
 import re
 
-
-FIELDS = [
-    "shipper",
-    "consignee",
-    "notify_party",
-    "port_of_loading",
-    "port_of_discharge",
-    "container_count",
-    "gross_weight_kg",
-]
+from .config import FIELDS
 
 
 def clean_value(value):
@@ -181,15 +172,7 @@ def canonical_field(key):
 
 def extract_document(text, document_type=None):
 
-    data = {
-        "shipper": None,
-        "consignee": None,
-        "notify_party": None,
-        "port_of_loading": None,
-        "port_of_discharge": None,
-        "container_count": None,
-        "gross_weight_kg": None,
-    }
+    data = {field: None for field in FIELDS}
 
     if not text:
         return data

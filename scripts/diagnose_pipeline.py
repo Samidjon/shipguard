@@ -1,135 +1,97 @@
+#!/usr/bin/env python3
+"""
+Where does the pipeline lose document comparisons?
+
+Counts every stage of the BL_COMPARISON path — attachments found, read
+errors, missing fields, matches and mismatches — and prints the most common
+missing/mismatching fields plus a handful of examples.
+
+    python scripts/diagnose_pipeline.py
+"""
+
+import sys
 from collections import Counter
+from pathlib import Path
 
-from loader import Inbox
-from classifier import classify_email
-from document_reader import read_document
-from extractor import extract_document
-from comparator import compare_documents
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-
-DATA_SOURCE = r"C:\Users\suley\Documents\hackathon\sdoc-hackathon-bundle"
-
-FIELDS = [
-    "shipper",
-    "consignee",
-    "notify_party",
-    "port_of_loading",
-    "port_of_discharge",
-    "container_count",
-    "gross_weight_kg",
-]
+from shipguard.classifier import classify_email
+from shipguard.comparator import compare_documents
+from shipguard.config import FIELDS, get_data_source
+from shipguard.document_reader import read_document
+from shipguard.extractor import extract_document
+from shipguard.loader import Inbox
+from shipguard.pipeline import find_attachment
 
 
-def find_attachment(attachments, document_type):
-
-    document_type = document_type.lower()
-
-    for attachment in attachments:
-
-        filename = attachment.lower()
-        filename = filename.split("/")[-1]
-
-        filename_without_extension = filename.rsplit(".", 1)[0]
-
-        if filename_without_extension.endswith(
-            "_" + document_type
-        ):
-            return attachment
-
-    return None
+# Example values printed below come from the documents themselves and can be
+# non-ASCII; keep output safe on the default Windows console encoding.
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 
 def main():
 
-    inbox = Inbox(DATA_SOURCE)
+    inbox = Inbox(get_data_source())
 
     emails = list(inbox)
 
     stats = Counter()
-
     missing_fields = Counter()
-
     mismatch_fields = Counter()
-
     examples = []
 
     for email in emails:
 
-        category = classify_email(email)
-
-        if category != "DOCUMENT_COMPARISON":
+        if classify_email(email) != "BL_COMPARISON":
             continue
 
-        stats["DOCUMENT_COMPARISON"] += 1
+        stats["BL_COMPARISON"] += 1
 
         attachments = email.get("attachments", [])
 
-        si_path = find_attachment(
-            attachments,
-            "SI"
-        )
+        si_path = find_attachment(attachments, "SI")
+        bl_path = find_attachment(attachments, "BL")
 
-        bl_path = find_attachment(
-            attachments,
-            "BL"
-        )
-
-        # =====================================================
+        # -----------------------------------------------------
         # ATTACHMENT CHECK
-        # =====================================================
+        # -----------------------------------------------------
 
         if not si_path and not bl_path:
-
             stats["NO_SI_AND_BL"] += 1
             continue
 
         if not si_path:
-
             stats["NO_SI"] += 1
             continue
 
         if not bl_path:
-
             stats["NO_BL"] += 1
             continue
 
         stats["HAS_SI_AND_BL"] += 1
 
-        # =====================================================
+        # -----------------------------------------------------
         # READ DOCUMENTS
-        # =====================================================
+        # -----------------------------------------------------
 
         try:
-
-            si_text = read_document(
-                inbox,
-                si_path
-            )
-
-            bl_text = read_document(
-                inbox,
-                bl_path
-            )
+            si_text = read_document(inbox, si_path)
+            bl_text = read_document(inbox, bl_path)
 
         except Exception as error:
 
             stats["READ_ERROR"] += 1
 
             if len(examples) < 10:
-
                 examples.append(
-                    (
-                        email["email_id"],
-                        "READ_ERROR",
-                        str(error),
-                    )
+                    (email["email_id"], "READ_ERROR", str(error))
                 )
 
             continue
 
-        # =====================================================
+        # -----------------------------------------------------
         # EXTRACT
-        # =====================================================
+        # -----------------------------------------------------
 
         si_data = extract_document(si_text, "SI")
         bl_data = extract_document(bl_text, "BL")
@@ -139,142 +101,71 @@ def main():
         for field in FIELDS:
 
             if si_data.get(field) is None:
-
-                missing.append(
-                    f"SI:{field}"
-                )
-
-                missing_fields[
-                    f"SI:{field}"
-                ] += 1
+                missing.append(f"SI:{field}")
+                missing_fields[f"SI:{field}"] += 1
 
             if bl_data.get(field) is None:
-
-                missing.append(
-                    f"BL:{field}"
-                )
-
-                missing_fields[
-                    f"BL:{field}"
-                ] += 1
-
-        # =====================================================
-        # MISSING FIELD
-        # =====================================================
+                missing.append(f"BL:{field}")
+                missing_fields[f"BL:{field}"] += 1
 
         if missing:
 
             stats["MISSING_FIELDS"] += 1
 
             if len(examples) < 10:
-
                 examples.append(
-                    (
-                        email["email_id"],
-                        "MISSING_FIELDS",
-                        missing,
-                    )
+                    (email["email_id"], "MISSING_FIELDS", missing)
                 )
 
             continue
 
-        # =====================================================
-        # FULLY EXTRACTED
-        # =====================================================
+        # -----------------------------------------------------
+        # COMPARE
+        # -----------------------------------------------------
 
         stats["FULLY_EXTRACTED"] += 1
 
-        comparison = compare_documents(
-            si_data,
-            bl_data
-        )
-
-        # =====================================================
-        # MATCH
-        # =====================================================
+        comparison = compare_documents(si_data, bl_data)
 
         if comparison["match"]:
-
             stats["MATCH"] += 1
+            continue
 
-        # =====================================================
-        # MISMATCH
-        # =====================================================
+        stats["MISMATCH"] += 1
 
-        else:
+        for mismatch in comparison["mismatches"]:
+            mismatch_fields[mismatch["field"]] += 1
 
-            stats["MISMATCH"] += 1
-
-            for mismatch in comparison["mismatches"]:
-
-                mismatch_fields[
-                    mismatch["field"]
-                ] += 1
-
-            if len(examples) < 10:
-
-                examples.append(
-                    (
-                        email["email_id"],
-                        "MISMATCH",
-                        comparison["mismatches"],
-                    )
+        if len(examples) < 10:
+            examples.append(
+                (
+                    email["email_id"],
+                    "MISMATCH",
+                    comparison["mismatches"],
                 )
+            )
 
     # =========================================================
-    # PRINT RESULTS
+    # REPORT
     # =========================================================
 
     print()
     print("=" * 80)
     print("PIPELINE DIAGNOSTIC")
     print("=" * 80)
-
     print()
 
-    print(
-        f"Document comparison: {stats['DOCUMENT_COMPARISON']}"
-    )
-
-    print(
-        f"Has SI + BL:         {stats['HAS_SI_AND_BL']}"
-    )
-
-    print(
-        f"No SI + no BL:       {stats['NO_SI_AND_BL']}"
-    )
-
-    print(
-        f"No SI:               {stats['NO_SI']}"
-    )
-
-    print(
-        f"No BL:               {stats['NO_BL']}"
-    )
-
-    print(
-        f"Read errors:         {stats['READ_ERROR']}"
-    )
-
-    print(
-        f"Missing fields:      {stats['MISSING_FIELDS']}"
-    )
-
-    print(
-        f"Fully extracted:     {stats['FULLY_EXTRACTED']}"
-    )
-
-    print(
-        f"MATCH:               {stats['MATCH']}"
-    )
-
-    print(
-        f"MISMATCH:            {stats['MISMATCH']}"
-    )
-
-    # =========================================================
-    # MISSING FIELD COUNTS
-    # =========================================================
+    print(f"Total emails:        {len(emails)}")
+    print(f"BL comparison:       {stats['BL_COMPARISON']}")
+    print(f"Has SI + BL:         {stats['HAS_SI_AND_BL']}")
+    print(f"No SI + no BL:       {stats['NO_SI_AND_BL']}")
+    print(f"No SI:               {stats['NO_SI']}")
+    print(f"No BL:               {stats['NO_BL']}")
+    print(f"Read errors:         {stats['READ_ERROR']}")
+    print(f"Missing fields:      {stats['MISSING_FIELDS']}")
+    print(f"Fully extracted:     {stats['FULLY_EXTRACTED']}")
+    print(f"MATCH:               {stats['MATCH']}")
+    print(f"MISMATCH:            {stats['MISMATCH']}")
 
     print()
     print("=" * 80)
@@ -282,14 +173,7 @@ def main():
     print("=" * 80)
 
     for field, count in missing_fields.most_common():
-
-        print(
-            f"{field:<35} {count}"
-        )
-
-    # =========================================================
-    # MISMATCH FIELD COUNTS
-    # =========================================================
+        print(f"{field:<35} {count}")
 
     print()
     print("=" * 80)
@@ -297,14 +181,7 @@ def main():
     print("=" * 80)
 
     for field, count in mismatch_fields.most_common():
-
-        print(
-            f"{field:<35} {count}"
-        )
-
-    # =========================================================
-    # EXAMPLES
-    # =========================================================
+        print(f"{field:<35} {count}")
 
     print()
     print("=" * 80)
@@ -312,12 +189,8 @@ def main():
     print("=" * 80)
 
     for email_id, problem_type, details in examples:
-
         print()
-        print(
-            f"{email_id} -> {problem_type}"
-        )
-
+        print(f"{email_id} -> {problem_type}")
         print(details)
 
 

@@ -1,35 +1,45 @@
-from loader import Inbox
-from classifier import classify_email
-from document_reader import read_document
-from extractor import extract_document
-from comparator import compare_documents
+#!/usr/bin/env python3
+"""
+Show SI vs BL field values for emails the pipeline flags as MISMATCH.
 
-DATA_SOURCE = r"C:\Users\suley\Documents\hackathon\sdoc-hackathon-bundle"
+Only emails where every required field was extracted from both documents
+are shown, so the differences printed here are real defects rather than
+extraction gaps.
+
+    python scripts/inspect_mismatches.py
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from shipguard.classifier import classify_email
+from shipguard.comparator import compare_documents
+from shipguard.config import FIELDS, get_data_source
+from shipguard.document_reader import read_document
+from shipguard.extractor import extract_document
+from shipguard.loader import Inbox
+from shipguard.pipeline import find_attachment
 
 
-def find_attachment(attachments, document_type):
-    document_type = document_type.lower()
+# Document values contain non-ASCII characters; keep printing them safe on
+# the default Windows console encoding.
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-    for attachment in attachments:
-        filename = attachment.lower()
-        filename = filename.split("/")[-1]
-        filename_without_extension = filename.rsplit(".", 1)[0]
 
-        if filename_without_extension.endswith("_" + document_type):
-            return attachment
-
-    return None
+LIMIT = 20
 
 
 def main():
 
-    inbox = Inbox(DATA_SOURCE)
+    inbox = Inbox(get_data_source())
 
     count = 0
 
     for email in inbox:
 
-        if classify_email(email) != "DOCUMENT_COMPARISON":
+        if classify_email(email) != "BL_COMPARISON":
             continue
 
         attachments = email.get("attachments", [])
@@ -41,62 +51,53 @@ def main():
             continue
 
         try:
-            si_text = read_document(inbox, si_path)
-            bl_text = read_document(inbox, bl_path)
-
-            si_data = extract_document(si_text, "SI")
-            bl_data = extract_document(bl_text, "BL")
+            si_data = extract_document(read_document(inbox, si_path), "SI")
+            bl_data = extract_document(read_document(inbox, bl_path), "BL")
 
         except Exception:
             continue
 
-        fields = [
-            "shipper",
-            "consignee",
-            "notify_party",
-            "port_of_loading",
-            "port_of_discharge",
-            "container_count",
-            "gross_weight_kg",
-        ]
-
-        if any(
+        incomplete = any(
             si_data.get(field) is None or bl_data.get(field) is None
-            for field in fields
-        ):
+            for field in FIELDS
+        )
+
+        if incomplete:
             continue
 
         result = compare_documents(si_data, bl_data)
 
-        if not result["match"]:
+        if result["match"]:
+            continue
 
-            count += 1
+        count += 1
 
-            print()
-            print("=" * 80)
-            print(f"{email['email_id']}")
-            print("=" * 80)
+        print()
+        print("=" * 80)
+        print(email["email_id"])
+        print("=" * 80)
 
-            print()
-            print("SI:")
-            for field in fields:
-                print(f"{field:<25}: {si_data.get(field)}")
+        print()
+        print("SI:")
+        for field in FIELDS:
+            print(f"{field:<25}: {si_data.get(field)}")
 
-            print()
-            print("BL:")
-            for field in fields:
-                print(f"{field:<25}: {bl_data.get(field)}")
+        print()
+        print("BL:")
+        for field in FIELDS:
+            print(f"{field:<25}: {bl_data.get(field)}")
 
-            print()
-            print("MISMATCHES:")
+        print()
+        print("MISMATCHES:")
 
-            for mismatch in result["mismatches"]:
-                print(mismatch)
+        for mismatch in result["mismatches"]:
+            print(mismatch)
 
-            print()
+        if count >= LIMIT:
+            break
 
-            if count >= 20:
-                break
+    print()
+    print(f"Shown: {count} (limit {LIMIT})")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,21 @@
+# Dashboard theme.
+#
+# Without this Streamlit renders its own chrome — top toolbar, widget labels,
+# captions, metrics, expanders, dataframes — with the LIGHT palette while the
+# custom CSS paints a dark background. The result was dim headings, barely
+# legible sidebar labels and a white strip across the top of the page.
+# Setting the theme fixes all of that at the source instead of patching each
+# element with CSS overrides.
+
+[theme]
+base = "dark"
+primaryColor = "#3b82f6"
+backgroundColor = "#0b1020"
+secondaryBackgroundColor = "#151d33"
+textColor = "#e8eefc"
+font = "sans serif"
+
+[browser]
+# Skips the "Welcome to Streamlit! Email:" onboarding prompt, which otherwise
+# blocks a first run on a machine that has never run Streamlit.
+gatherUsageStats = false

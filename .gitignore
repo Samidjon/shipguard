@@ -2,8 +2,15 @@
 .env.*
 !.env.example
 
+# Organizer-only package: contains the answer key (ground_truth.json).
+# Must never be committed or pushed.
+sdoc-hackathon-docker/
+ground_truth.json
+
 __pycache__/
 *.py[cod]
+
+.pytest_cache/
 
 .venv/
 venv/

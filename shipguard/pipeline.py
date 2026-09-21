@@ -1,26 +1,14 @@
 import json
 
-from loader import Inbox
-from classifier import classify_email
-from document_reader import read_document
-from extractor import extract_document
-from comparator import compare_documents
+from .loader import Inbox
+from .classifier import classify_email
+from .document_reader import read_document
+from .extractor import extract_document
+from .comparator import compare_documents
+from .config import FIELDS, RESULTS_PATH, SUBMISSION_PATH, get_data_source
 
 
-from pathlib import Path
-
-DATA_SOURCE = Path(__file__).resolve().parent / "sdoc-hackathon-bundle"
-
-
-FIELDS = [
-    "shipper",
-    "consignee",
-    "notify_party",
-    "port_of_loading",
-    "port_of_discharge",
-    "container_count",
-    "gross_weight_kg",
-]
+DATA_SOURCE = get_data_source()
 
 
 def find_attachment(attachments, document_type):
@@ -111,6 +99,23 @@ def process_email(inbox, email):
     si_path = find_attachment(attachments, "SI")
     bl_path = find_attachment(attachments, "BL")
 
+    # Nothing was sent at all. These are thread replies and requests along the
+    # lines of "please send the draft BL for checking" — there is no document
+    # to compare and nothing has gone wrong, so escalating them would flood a
+    # reviewer with false alarms. Report a clean result instead.
+    if not attachments:
+
+        return {
+            "email_id": email_id,
+            "category": "BL_COMPARISON",
+            "status": "OK",
+            "review_reason": None,
+            "has_defect": False,
+            "defect_fields": [],
+        }
+
+    # Documents were attached but the SI/BL pair is incomplete: one half of the
+    # comparison is genuinely missing, which a person needs to chase.
     if not si_path or not bl_path:
 
         return {
@@ -306,7 +311,7 @@ def main():
     # =========================================================
 
     with open(
-        "results.json",
+        RESULTS_PATH,
         "w",
         encoding="utf-8"
     ) as file:
@@ -337,7 +342,7 @@ def main():
         }
 
     with open(
-        "submission.json",
+        SUBMISSION_PATH,
         "w",
         encoding="utf-8"
     ) as file:
@@ -378,8 +383,8 @@ def main():
     print()
 
     print("Created:")
-    print("  results.json")
-    print("  submission.json")
+    print(f"  {RESULTS_PATH}")
+    print(f"  {SUBMISSION_PATH}")
 
 
 if __name__ == "__main__":

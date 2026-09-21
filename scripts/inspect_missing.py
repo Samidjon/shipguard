@@ -1,24 +1,40 @@
-from loader import Inbox
-from classifier import classify_email
-from document_reader import read_document
-from extractor import extract_document
+#!/usr/bin/env python3
+"""
+Dump extracted data and raw text for specific emails.
 
-DATA_SOURCE = r"C:\Users\suley\Documents\hackathon\sdoc-hackathon-bundle"
+Use this when an email lands on NEEDS_REVIEW / missing_value and you need to
+see which label the document actually used.
+
+    python scripts/inspect_missing.py                    # a default sample
+    python scripts/inspect_missing.py email_004 email_032
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from shipguard.config import get_data_source
+from shipguard.document_reader import read_document
+from shipguard.extractor import extract_document
+from shipguard.loader import Inbox
+from shipguard.pipeline import find_attachment
 
 
-def find_attachment(attachments, document_type):
-    document_type = document_type.lower()
+# Shipping documents contain non-ASCII characters; without this the default
+# Windows console encoding raises UnicodeEncodeError while printing them.
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-    for attachment in attachments:
-        filename = attachment.lower()
-        filename = filename.split("/")[-1]
 
-        filename_without_extension = filename.rsplit(".", 1)[0]
+DEFAULT_EMAILS = [
+    "email_004",
+    "email_032",
+    "email_040",
+    "email_051",
+    "email_055",
+]
 
-        if filename_without_extension.endswith("_" + document_type):
-            return attachment
-
-    return None
+RAW_TEXT_LIMIT = 5000
 
 
 def print_document(label, path, text, data):
@@ -37,32 +53,18 @@ def print_document(label, path, text, data):
 
     print()
     print("--- RAW TEXT ---")
+    print(text[:RAW_TEXT_LIMIT])
 
-    print(text[:5000])
 
+def main(wanted_emails):
 
-def main():
-    inbox = Inbox(DATA_SOURCE)
+    inbox = Inbox(get_data_source())
 
-    wanted_emails = [
-        "email_004",
-        "email_032",
-        "email_040",
-        "email_051",
-        "email_055",
-        "email_058",
-        "email_059",
-        "email_065",
-        "email_068",
-        "email_091",
-    ]
+    wanted = set(wanted_emails)
 
     for email in inbox:
 
-        if email["email_id"] not in wanted_emails:
-            continue
-
-        if classify_email(email) != "DOCUMENT_COMPARISON":
+        if email["email_id"] not in wanted:
             continue
 
         print()
@@ -87,38 +89,27 @@ def main():
         print(f"SI: {si_path}")
         print(f"BL: {bl_path}")
 
-        if si_path:
-            try:
-                si_text = read_document(inbox, si_path)
-                si_data = extract_document(si_text)
+        for label, path, document_type in [
+            ("SHIPPING INSTRUCTION", si_path, "SI"),
+            ("BILL OF LADING", bl_path, "BL"),
+        ]:
 
-                print_document(
-                    "SHIPPING INSTRUCTION",
-                    si_path,
-                    si_text,
-                    si_data
-                )
+            if not path:
+                continue
+
+            # Only the read/extract step is guarded, so a printing problem
+            # is never misreported as a document read failure.
+            try:
+                text = read_document(inbox, path)
+                data = extract_document(text, document_type)
 
             except Exception as error:
                 print()
-                print(f"SI READ ERROR: {error}")
+                print(f"{document_type} READ ERROR: {error}")
+                continue
 
-        if bl_path:
-            try:
-                bl_text = read_document(inbox, bl_path)
-                bl_data = extract_document(bl_text)
-
-                print_document(
-                    "BILL OF LADING",
-                    bl_path,
-                    bl_text,
-                    bl_data
-                )
-
-            except Exception as error:
-                print()
-                print(f"BL READ ERROR: {error}")
+            print_document(label, path, text, data)
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1:] or DEFAULT_EMAILS)

@@ -6,10 +6,15 @@ import logging
 import streamlit as st
 from google import genai
 
+from . import config
 
-MODEL = "gemini-3.5-flash-lite"
 
 logger = logging.getLogger(__name__)
+
+
+# Remembers the first model that actually answered, so later calls in the
+# same process skip candidates already known to be unavailable.
+_resolved_model = None
 
 
 def get_gemini_api_key():
@@ -35,8 +40,11 @@ def get_gemini_api_key():
             return str(api_key).strip()
 
     except Exception as error:
-        logger.warning(
-            "Could not read GEMINI_API_KEY from Streamlit secrets: %s",
+        # Having no secrets.toml is the normal case outside Streamlit Cloud,
+        # so this is a debug detail rather than a warning. Logging it louder
+        # filled the terminal with alarming noise on every analysis.
+        logger.debug(
+            "No GEMINI_API_KEY in Streamlit secrets: %s",
             error,
         )
 
@@ -71,63 +79,161 @@ def clean_json_response(text):
     return text
 
 
+def is_temporary_error(error_text):
+    """
+    Detect transient Gemini availability problems worth retrying.
+    """
+
+    lowered = error_text.lower()
+
+    return (
+        "503" in error_text
+        or "UNAVAILABLE" in error_text
+        or "high demand" in lowered
+    )
+
+
+def is_model_not_found_error(error_text):
+    """
+    Detect "this model does not exist / is not available to you" errors,
+    which mean we should try the next candidate rather than give up.
+    """
+
+    lowered = error_text.lower()
+
+    return (
+        "404" in error_text
+        or "not_found" in lowered
+        or "not found" in lowered
+    )
+
+
+def candidate_models():
+    """
+    Models to try, in order.
+
+    An explicit GEMINI_MODEL override wins and disables fallback. Once a
+    model has answered successfully we stick to it for the rest of the
+    process.
+    """
+
+    override = config.get_model_override()
+
+    if override:
+        return [override]
+
+    if _resolved_model:
+        return [_resolved_model]
+
+    return list(config.MODEL_CANDIDATES)
+
+
 def generate_with_retry(client, prompt, attempts=3):
     """
-    Retry temporary Gemini 503/unavailable errors.
+    Call Gemini, retrying temporary 503/unavailable errors and falling
+    through to the next candidate model if one turns out not to exist.
     """
+
+    global _resolved_model
 
     last_error = None
 
-    for attempt in range(attempts):
-        try:
-            logger.info(
-                "Calling Gemini model %s (attempt %s/%s)",
-                MODEL,
-                attempt + 1,
-                attempts,
-            )
+    for model in candidate_models():
 
-            start_time = time.perf_counter()
+        for attempt in range(attempts):
 
-            response = client.models.generate_content(
-                model=MODEL,
-                contents=prompt,
-            )
+            try:
+                logger.info(
+                    "Calling Gemini model %s (attempt %s/%s)",
+                    model,
+                    attempt + 1,
+                    attempts,
+                )
 
-            elapsed = time.perf_counter() - start_time
+                start_time = time.perf_counter()
 
-            logger.info(
-                "Gemini request completed successfully in %.2f seconds.",
-                elapsed,
-            )
+                response = client.models.generate_content(
+                    model=model,
+                    contents=prompt,
+                )
 
-            return response
+                elapsed = time.perf_counter() - start_time
 
-        except Exception as error:
-            last_error = error
+                logger.info(
+                    "Gemini request to %s completed successfully "
+                    "in %.2f seconds.",
+                    model,
+                    elapsed,
+                )
 
-            error_text = str(error)
+                _resolved_model = model
 
-            logger.exception(
-                "Gemini request failed on attempt %s/%s: %s",
-                attempt + 1,
-                attempts,
-                error,
-            )
+                return response
 
-            # Retry temporary server / availability errors
-            if (
-                "503" in error_text
-                or "UNAVAILABLE" in error_text
-                or "high demand" in error_text.lower()
-            ):
-                if attempt < attempts - 1:
-                    time.sleep(2 ** attempt)
-                    continue
+            except Exception as error:
+                last_error = error
 
-            raise
+                error_text = str(error)
+
+                logger.warning(
+                    "Gemini request to %s failed on attempt %s/%s: %s",
+                    model,
+                    attempt + 1,
+                    attempts,
+                    error,
+                )
+
+                # Transient problem: back off and retry the same model.
+                if is_temporary_error(error_text):
+                    if attempt < attempts - 1:
+                        time.sleep(2 ** attempt)
+                        continue
+
+                    raise
+
+                # Model does not exist: stop retrying it and try the next
+                # candidate instead.
+                if is_model_not_found_error(error_text):
+                    logger.warning(
+                        "Model %s is unavailable; trying the next "
+                        "candidate.",
+                        model,
+                    )
+                    break
+
+                raise
 
     raise last_error
+
+
+def discover_models(client=None):
+    """
+    List model ids that support generateContent for the configured key.
+
+    Useful for picking a value for GEMINI_MODEL: the set of available models
+    depends on the API key, so it cannot be determined offline.
+
+    Caveat worth knowing: appearing in this list does NOT guarantee the model
+    answers. Some entries are retired for new keys and return 404 on
+    generateContent with a message naming their replacement. Confirm a choice
+    by actually calling it — which generate_with_retry does automatically by
+    walking config.MODEL_CANDIDATES.
+    """
+
+    if client is None:
+        client = get_client()
+
+    available = []
+
+    for model in client.models.list():
+
+        actions = getattr(model, "supported_actions", None) or []
+
+        if not actions or "generateContent" in actions:
+            name = getattr(model, "name", "") or ""
+            available.append(name.removeprefix("models/"))
+
+    return available
 
 
 def analyze_shipping_email(subject, body):

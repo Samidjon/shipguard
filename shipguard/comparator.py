@@ -1,49 +1,6 @@
-FIELDS = [
-    "shipper",
-    "consignee",
-    "notify_party",
-    "port_of_loading",
-    "port_of_discharge",
-    "container_count",
-    "gross_weight_kg",
-]
-
-
 import re
 
-
-def normalize_value(value):
-    if value is None:
-        return None
-
-    if isinstance(value, str):
-        value = value.strip().lower()
-
-        # Remove port/UN location codes in parentheses.
-        # Example:
-        # "NHAVA SHEVA, INDIA (INNSA)"
-        # -> "nhava sheva, india"
-        value = re.sub(r"\s*\([a-z]{5}\)\s*$", "", value)
-
-        value = " ".join(value.split())
-
-        return value
-
-    return value
-
-
-import re
-
-
-FIELDS = [
-    "shipper",
-    "consignee",
-    "notify_party",
-    "port_of_loading",
-    "port_of_discharge",
-    "container_count",
-    "gross_weight_kg",
-]
+from .config import FIELDS
 
 
 def normalize_text(value):

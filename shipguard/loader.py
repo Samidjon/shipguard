@@ -2,6 +2,11 @@
 """
 loader.py — one-import access to the SDOC hackathon inbox (participants).
 
+Vendored verbatim from the organizer bundle
+(``sdoc-hackathon-bundle/loader.py``). Keep it in sync with the bundle
+rather than editing it locally, so the data access contract stays exactly
+the one the organizers defined.
+
 Works two ways with the same API:
 
   # A) local files (static bundle):

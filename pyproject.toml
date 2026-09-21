@@ -1,0 +1,7 @@
+#  ShipGuard is run directly from the repository (Streamlit entry point at
+#  app.py, CLI entry point at run_pipeline.py) and the `shipguard` package
+#  is importable from the repository root, so no build or install step is
+#  required. This file only configures the test runner.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
