@@ -1,19 +1,55 @@
 import json
 import os
 import time
+import logging
 
+import streamlit as st
 from google import genai
 
 
 MODEL = "gemini-3.5-flash-lite"
 
+logger = logging.getLogger(__name__)
+
+
+def get_gemini_api_key():
+    """
+    Get Gemini API key.
+
+    Priority:
+    1. Environment variable - useful for local development
+    2. Streamlit Secrets - required for Streamlit Cloud
+    """
+
+    # Local development
+    api_key = os.getenv("GEMINI_API_KEY")
+
+    if api_key:
+        return api_key.strip()
+
+    # Streamlit Cloud
+    try:
+        api_key = st.secrets.get("GEMINI_API_KEY")
+
+        if api_key:
+            return str(api_key).strip()
+
+    except Exception as error:
+        logger.warning(
+            "Could not read GEMINI_API_KEY from Streamlit secrets: %s",
+            error,
+        )
+
+    return None
+
 
 def get_client():
-    api_key = os.getenv("GEMINI_API_KEY")
+    api_key = get_gemini_api_key()
 
     if not api_key:
         raise RuntimeError(
-            "GEMINI_API_KEY environment variable is not set."
+            "GEMINI_API_KEY was not found in environment variables "
+            "or Streamlit secrets."
         )
 
     return genai.Client(api_key=api_key)
@@ -21,8 +57,10 @@ def get_client():
 
 def clean_json_response(text):
     """
-    Remove Markdown code fences if Gemini returns JSON inside ```json ... ```.
+    Remove Markdown code fences if Gemini returns JSON inside
+    ```json ... ```.
     """
+
     text = text.strip()
 
     if text.startswith("```"):
@@ -42,15 +80,33 @@ def generate_with_retry(client, prompt, attempts=3):
 
     for attempt in range(attempts):
         try:
-            return client.models.generate_content(
+            logger.info(
+                "Calling Gemini model %s (attempt %s/%s)",
+                MODEL,
+                attempt + 1,
+                attempts,
+            )
+
+            response = client.models.generate_content(
                 model=MODEL,
                 contents=prompt,
             )
+
+            logger.info("Gemini request completed successfully.")
+
+            return response
 
         except Exception as error:
             last_error = error
 
             error_text = str(error)
+
+            logger.exception(
+                "Gemini request failed on attempt %s/%s: %s",
+                attempt + 1,
+                attempts,
+                error,
+            )
 
             # Retry temporary server / availability errors
             if (
@@ -125,17 +181,31 @@ Return ONLY valid JSON:
 Do not include Markdown.
 """
 
-    response = generate_with_retry(client, prompt)
-
-    text = clean_json_response(response.text)
-
     try:
+        response = generate_with_retry(client, prompt)
+
+        text = clean_json_response(response.text)
+
         return json.loads(text)
 
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as error:
+        logger.exception("Gemini returned invalid JSON: %s", error)
+
         return {
-            "category": "GENERAL",
-            "summary": "AI returned an invalid response.",
+            "category": "ERROR",
+            "summary": "Gemini returned an invalid JSON response.",
+            "confidence": 0.0,
+        }
+
+    except Exception as error:
+        logger.exception(
+            "AI email analysis failed: %s",
+            error,
+        )
+
+        return {
+            "category": "ERROR",
+            "summary": "AI analysis could not be completed.",
             "confidence": 0.0,
         }
 
@@ -225,17 +295,35 @@ If there are no discrepancies, return an empty discrepancies array.
 Do not include Markdown.
 """
 
-    response = generate_with_retry(client, prompt)
-
-    text = clean_json_response(response.text)
-
     try:
+        response = generate_with_retry(client, prompt)
+
+        text = clean_json_response(response.text)
+
         return json.loads(text)
 
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as error:
+        logger.exception(
+            "Gemini returned invalid JSON for discrepancy explanation: %s",
+            error,
+        )
+
         return {
             "headline": "AI explanation unavailable",
             "summary": "Gemini returned an invalid response.",
             "discrepancies": [],
             "recommendation": "Review the deterministic validation result.",
+        }
+
+    except Exception as error:
+        logger.exception(
+            "AI discrepancy explanation failed: %s",
+            error,
+        )
+
+        return {
+            "headline": "AI explanation unavailable",
+            "summary": "Gemini could not generate an explanation.",
+            "discrepancies": [],
+            "recommendation": "Review the deterministic SI/BL comparison below.",
         }
